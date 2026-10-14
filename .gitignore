@@ -1,0 +1,4 @@
+.clasprc.json
+.system_generated/
+*.log
+scratch/

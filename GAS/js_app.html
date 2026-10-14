@@ -1,0 +1,904 @@
+<script>
+  /**
+   * =========================================================================
+   * รายงานสถานะ Cloud คณะพยาบาลศาสตร์ สถาบันพระบรมราชชนก
+   * Client-side Controller & Dynamic Card Renderer
+   * =========================================================================
+   */
+
+  document.addEventListener('DOMContentLoaded', function () {
+    startLiveClock();
+    loadDashboardData();
+    checkAdminSession();
+  });
+
+  /**
+   * นาฬิกาแสดง วันที่ และ เวลา แบบ Live Clock ตรงป้ายสถานะออนไลน์
+   */
+  function startLiveClock() {
+    const el = document.getElementById('navLiveDateTime');
+    if (!el) return;
+
+    const thaiMonths = [
+      'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
+      'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
+    ];
+
+    function update() {
+      const now = new Date();
+      const day = now.getDate();
+      const monthStr = thaiMonths[now.getMonth()];
+      const yearBe = now.getFullYear() + 543; // ปี พ.ศ.
+      const hours = String(now.getHours()).padStart(2, '0');
+      const mins = String(now.getMinutes()).padStart(2, '0');
+      const secs = String(now.getSeconds()).padStart(2, '0');
+
+      el.innerHTML = `
+        <i class="fa-regular fa-calendar-days text-primary me-1"></i>${day} ${monthStr} ${yearBe} 
+        <i class="fa-regular fa-clock text-primary ms-1 me-1"></i>${hours}:${mins}:${secs} น.
+      `;
+    }
+
+    update();
+    setInterval(update, 1000);
+  }
+
+  /**
+   * เรียกข้อมูลจาก Google Apps Script Backend
+   */
+  function loadDashboardData() {
+    const btnRefresh = document.getElementById('btnRefresh');
+    const loadingPlaceholder = document.getElementById('loadingPlaceholder');
+    const serverCardsContainer = document.getElementById('serverCardsContainer');
+    const alertContainer = document.getElementById('alertContainer');
+
+    // UI Loading State
+    if (btnRefresh) {
+      btnRefresh.disabled = true;
+      btnRefresh.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i> กำลังโหลด...';
+    }
+    loadingPlaceholder.classList.remove('d-none');
+    serverCardsContainer.classList.add('d-none');
+    alertContainer.innerHTML = '';
+
+    // เรียกฟังก์ชันฝั่ง GAS
+    google.script.run
+      .withSuccessHandler(onDataLoadedSuccess)
+      .withFailureHandler(onDataLoadedFailure)
+      .getPublicCloudStatusData();
+  }
+
+  /**
+   * จัดการเมื่อดึงข้อมูลสำเร็จ
+   */
+  function onDataLoadedSuccess(res) {
+    const btnRefresh = document.getElementById('btnRefresh');
+    const loadingPlaceholder = document.getElementById('loadingPlaceholder');
+    const serverCardsContainer = document.getElementById('serverCardsContainer');
+    const alertContainer = document.getElementById('alertContainer');
+    const lastUpdatedTime = document.getElementById('lastUpdatedTime');
+
+    if (btnRefresh) {
+      btnRefresh.disabled = false;
+      btnRefresh.innerHTML = '<i class="fa-solid fa-rotate-right me-1"></i> อัปเดตข้อมูล';
+    }
+    loadingPlaceholder.classList.add('d-none');
+
+    if (!res || !res.success) {
+      alertContainer.innerHTML = `
+        <div class="alert alert-warning border-0 shadow-sm d-flex align-items-center gap-3 mb-4">
+          <i class="fa-solid fa-triangle-exclamation fa-lg text-warning"></i>
+          <div>
+            <strong>ไม่สามารถโหลดข้อมูลได้:</strong> ${escapeHtml(res ? res.message : 'ไม่ทราบสาเหตุ')}
+          </div>
+        </div>
+      `;
+      return;
+    }
+
+    // อัปเดตเวลาซิงค์ล่าสุด
+    if (lastUpdatedTime && res.last_updated) {
+      lastUpdatedTime.textContent = res.last_updated;
+    }
+
+    // อัปเดตสรุป KPI Overview
+    if (res.summary) {
+      document.getElementById('kpiTotalServers').textContent = res.summary.total_servers || 0;
+      document.getElementById('kpiTotalServices').textContent = res.summary.total_services || 0;
+      document.getElementById('kpiTotalCpu').textContent = (res.summary.total_cpu_cores || 0) + ' Cores';
+      document.getElementById('kpiTotalRam').textContent = (res.summary.total_ram_gb || 0) + ' GB';
+
+      // อัปเดตการ์ดสถานะ 4 ประเภท
+      document.getElementById('kpiStatusActive').textContent = (res.summary.active_services || 0) + ' ระบบ';
+      document.getElementById('kpiStatusDev').textContent = (res.summary.dev_services || 0) + ' ระบบ';
+      document.getElementById('kpiStatusVacant').textContent = (res.summary.vacant_services || 0) + ' ระบบ';
+      document.getElementById('kpiStatusNoInfo').textContent = (res.summary.no_info_services || 0) + ' ระบบ';
+    }
+
+    // เรนเดอร์การ์ดเซิร์ฟเวอร์
+    renderServerCards(res.servers || []);
+    serverCardsContainer.classList.remove('d-none');
+
+    // เรียกใช้งาน Bootstrap Tooltips สำหรับแสดงรายละเอียดสถานะเมื่อเอาเมาส์ชี้
+    setTimeout(function() {
+      const tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+      tooltipTriggerList.map(function (tooltipTriggerEl) {
+        return new bootstrap.Tooltip(tooltipTriggerEl);
+      });
+    }, 100);
+  }
+
+  /**
+   * จัดการเมื่อการเรียก GAS ล้มเหลว
+   */
+  function onDataLoadedFailure(err) {
+    const btnRefresh = document.getElementById('btnRefresh');
+    const loadingPlaceholder = document.getElementById('loadingPlaceholder');
+    const alertContainer = document.getElementById('alertContainer');
+
+    if (btnRefresh) {
+      btnRefresh.disabled = false;
+      btnRefresh.innerHTML = '<i class="fa-solid fa-rotate-right me-1"></i> อัปเดตข้อมูล';
+    }
+    loadingPlaceholder.classList.add('d-none');
+
+    alertContainer.innerHTML = `
+      <div class="alert alert-danger border-0 shadow-sm d-flex align-items-center gap-3 mb-4">
+        <i class="fa-solid fa-circle-exclamation fa-lg text-danger"></i>
+        <div>
+          <strong>เกิดข้อผิดพลาดในการเชื่อมต่อเซิร์ฟเวอร์:</strong> ${escapeHtml(err ? err.message || err.toString() : 'ข้อผิดพลาดไม่ทราบสาเหตุ')}
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * เรนเดอร์การ์ดสำหรับเซิร์ฟเวอร์แต่ละเครื่อง
+   */
+  function renderServerCards(servers) {
+    const container = document.getElementById('serverCardsContainer');
+    container.innerHTML = '';
+
+    if (!servers || servers.length === 0) {
+      container.innerHTML = `
+        <div class="text-center py-5 bg-white rounded-4 border">
+          <i class="fa-solid fa-server fa-3x text-muted mb-3 opacity-50"></i>
+          <h5 class="fw-bold text-secondary">ไม่พบข้อมูลเซิร์ฟเวอร์ในแท็บ webapp</h5>
+          <p class="text-muted small">กรุณาตรวจสอบการกรอกข้อมูลในชีต webapp</p>
+        </div>
+      `;
+      return;
+    }
+
+    servers.forEach((server, index) => {
+      const cardHtml = createServerNodeHtml(server, index + 1);
+      container.insertAdjacentHTML('beforeend', cardHtml);
+    });
+  }
+
+  /**
+   * สร้าง HTML ของการ์ดเซิร์ฟเวอร์ 1 เครื่อง
+   */
+  function createServerNodeHtml(server, index) {
+    const osIcon = getOsIcon(server.os);
+    const servicesRows = (server.services || []).map((service, sIndex) => {
+      const badgeClass = getBadgeClass(service.status_type);
+      const urlButton = service.url && service.url !== '-' && service.url !== ''
+        ? `<a href="${escapeHtml(service.url)}" target="_blank" rel="noopener noreferrer" class="btn-url" title="เปิดลิงก์ ${escapeHtml(service.url)}">
+             <i class="fa-solid fa-arrow-up-right-from-square fa-xs"></i> คลิก
+           </a>`
+        : `<span class="text-muted small">-</span>`;
+
+      return `
+        <tr>
+          <td class="text-center text-muted fw-bold" style="width: 45px;">${service.order || (sIndex + 1)}</td>
+          <td style="min-width: 170px;">
+            <div class="fw-bold text-dark">${escapeHtml(service.name)}</div>
+          </td>
+          <td class="text-center" style="width: 90px;">
+            ${urlButton}
+          </td>
+          <td class="text-center" style="width: 130px;">
+            <span class="badge-status ${badgeClass}" 
+                  data-bs-toggle="tooltip" 
+                  data-bs-placement="top" 
+                  title="รายละเอียดสถานะ: ${escapeHtml(service.raw_status || service.status)}">
+              <i class="${getStatusIcon(service.status_type)}"></i>
+              <span>${escapeHtml(service.status)}</span>
+            </span>
+          </td>
+          <td style="min-width: 240px;">
+            <span class="text-secondary small">${escapeHtml(service.remark || '-')}</span>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    const emptyServicesHtml = `
+      <tr>
+        <td colspan="5" class="text-center py-4 text-muted">
+          <i class="fa-solid fa-circle-info me-1"></i> ยังไม่มีรายการระบบย่อยที่รันบนเครื่องนี้
+        </td>
+      </tr>
+    `;
+
+    return `
+      <div class="server-node-card">
+        <div class="row g-0">
+          
+          <!-- กล่องข้อมูล Server ด้านซ้าย (ปลอดภัย 100% แสดงเฉพาะ Server Name, OS, CPU, RAM, HDD) -->
+          <div class="col-lg-3 col-xl-3 server-hardware-pane">
+            <div class="d-flex align-items-center justify-content-between mb-3">
+              <div class="server-title">
+                <i class="fa-solid fa-hard-drive text-primary"></i>
+                <span>${escapeHtml(server.server_name)}</span>
+              </div>
+              <span class="badge bg-primary-subtle text-primary border border-primary-subtle rounded-pill px-3 py-1 small">
+                Node #${index}
+              </span>
+            </div>
+
+            <!-- สเปกฮาร์ดแวร์ -->
+            <div class="spec-list">
+              <!-- OS -->
+              <div class="spec-item">
+                <div class="spec-label">
+                  <i class="${osIcon} text-primary"></i>
+                  <span>ระบบปฏิบัติการ (OS)</span>
+                </div>
+                <div class="spec-value">${escapeHtml(server.os)}</div>
+              </div>
+
+              <!-- CPU -->
+              <div class="spec-item">
+                <div class="spec-label">
+                  <i class="fa-solid fa-microchip text-success"></i>
+                  <span>หน่วยประมวลผล (CPU)</span>
+                </div>
+                <div class="spec-value">${escapeHtml(server.cpu)}</div>
+              </div>
+
+              <!-- RAM -->
+              <div class="spec-item">
+                <div class="spec-label">
+                  <i class="fa-solid fa-memory text-warning"></i>
+                  <span>หน่วยความจำ (RAM)</span>
+                </div>
+                <div class="spec-value">${escapeHtml(server.ram)}</div>
+              </div>
+
+              <!-- Storage -->
+              <div class="spec-item">
+                <div class="spec-label">
+                  <i class="fa-solid fa-database text-info"></i>
+                  <span>ความจุฮาร์ดดิสก์ (HDD)</span>
+                </div>
+                <div class="spec-value">${escapeHtml(server.hdd)}</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ตารางระบบงานและบริการภายใน ด้านขวา (ขยายพื้นที่เป็น 9 ส่วน เพื่อความโปร่งและพอดีขอบ) -->
+          <div class="col-lg-9 col-xl-9 services-pane">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+              <h3 class="h6 mb-0 fw-bold text-dark d-flex align-items-center gap-2">
+                <i class="fa-solid fa-cubes-stacked text-secondary"></i>
+                <span>ระบบและบริการภายในที่ให้บริการ</span>
+              </h3>
+              <span class="badge bg-light text-secondary border rounded-pill">
+                ${server.services ? server.services.length : 0} บริการ
+              </span>
+            </div>
+
+            <div class="table-responsive">
+              <table class="table table-services">
+                <thead>
+                  <tr>
+                    <th class="text-center" style="width: 45px;">ลำดับ</th>
+                    <th style="min-width: 170px;">ระบบภายใน</th>
+                    <th class="text-center" style="width: 90px;">ลิงก์ URL</th>
+                    <th class="text-center" style="width: 130px;">สถานะ</th>
+                    <th style="min-width: 240px;">หมายเหตุ / ผู้รับผิดชอบ</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${servicesRows || emptyServicesHtml}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * ไอคอนประจำระบบปฏิบัติการ
+   */
+  function getOsIcon(os) {
+    if (!os) return 'fa-solid fa-server';
+    const osLower = os.toLowerCase();
+    if (osLower.includes('ubuntu') || osLower.includes('linux')) return 'fa-brands fa-ubuntu';
+    if (osLower.includes('windows')) return 'fa-brands fa-windows';
+    return 'fa-solid fa-server';
+  }
+
+  /**
+   * สไตล์ Badge สถานะ
+   */
+  function getBadgeClass(statusType) {
+    switch (statusType) {
+      case 'success': return 'badge-status-success';
+      case 'dev': return 'badge-status-dev';
+      case 'info': return 'badge-status-info';
+      case 'danger': return 'badge-status-danger';
+      case 'no-info':
+      case 'warning':
+      default: return 'badge-status-no-info';
+    }
+  }
+
+  /**
+   * ไอคอนสถานะ
+   */
+  function getStatusIcon(statusType) {
+    switch (statusType) {
+      case 'success': return 'fa-solid fa-circle-check';
+      case 'dev': return 'fa-solid fa-screwdriver-wrench';
+      case 'info': return 'fa-solid fa-circle-pause';
+      case 'danger': return 'fa-solid fa-circle-xmark';
+      case 'no-info':
+      case 'warning':
+      default: return 'fa-solid fa-circle-question';
+    }
+  }
+
+  /**
+   * Escape HTML ป้องกัน XSS
+   */
+  function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
+  // =========================================================================
+  // ระบบจัดการข้อมูลสำหรับเจ้าหน้าที่ (Admin Controller)
+  // =========================================================================
+
+  let currentAdminPassword = '';
+  let hasUnsavedChanges = false;
+  let adminLoginModalInstance = null;
+
+  /**
+   * ตรวจสอบสถานะการเข้าสู่ระบบจาก sessionStorage
+   */
+  function checkAdminSession() {
+    const savedPass = sessionStorage.getItem('bcnnv_admin_auth');
+    if (savedPass) {
+      currentAdminPassword = savedPass;
+      updateAdminNavState(true);
+    }
+  }
+
+  /**
+   * เปิด Modal ล็อกอินเจ้าหน้าที่
+   */
+  function openAdminLoginModal() {
+    const input = document.getElementById('adminPasswordInput');
+    const alertBox = document.getElementById('adminLoginAlert');
+    if (input) input.value = '';
+    if (alertBox) alertBox.innerHTML = '';
+
+    const modalEl = document.getElementById('adminLoginModal');
+    if (!adminLoginModalInstance) {
+      adminLoginModalInstance = new bootstrap.Modal(modalEl);
+    }
+    adminLoginModalInstance.show();
+    setTimeout(() => {
+      if (input) input.focus();
+    }, 400);
+  }
+
+  /**
+   * สลับดู/ซ่อนรหัสผ่านใน Modal
+   */
+  function toggleAdminPasswordVisibility() {
+    const input = document.getElementById('adminPasswordInput');
+    const icon = document.getElementById('togglePasswordIcon');
+    if (!input || !icon) return;
+
+    if (input.type === 'password') {
+      input.type = 'text';
+      icon.className = 'fa-regular fa-eye-slash';
+    } else {
+      input.type = 'password';
+      icon.className = 'fa-regular fa-eye';
+    }
+  }
+
+  /**
+   * ยืนยันรหัสผ่านเพื่อเข้าสู่ระบบ
+   */
+  function submitAdminLogin() {
+    const input = document.getElementById('adminPasswordInput');
+    const alertBox = document.getElementById('adminLoginAlert');
+    const btnSubmit = document.getElementById('btnSubmitAdminLogin');
+    const pwd = input ? input.value.trim() : '';
+
+    if (!pwd) {
+      alertBox.innerHTML = `
+        <div class="alert alert-danger py-2 small mb-3">กรุณากรอกรหัสผ่าน</div>
+      `;
+      return;
+    }
+
+    btnSubmit.disabled = true;
+    btnSubmit.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i> กำลังตรวจสอบ...';
+
+    google.script.run
+      .withSuccessHandler(function(res) {
+        btnSubmit.disabled = false;
+        btnSubmit.innerHTML = '<i class="fa-solid fa-arrow-right-to-bracket me-1"></i> เข้าสู่ระบบ';
+
+        if (res && res.success) {
+          currentAdminPassword = pwd;
+          sessionStorage.setItem('bcnnv_admin_auth', pwd);
+          if (adminLoginModalInstance) {
+            adminLoginModalInstance.hide();
+          }
+          updateAdminNavState(true);
+          switchAdminView(true); // สลับไปยังหน้าตาราง Excel ทันที
+          loadAdminSheetData();
+        } else {
+          alertBox.innerHTML = `
+            <div class="alert alert-danger py-2 small mb-3">
+              <i class="fa-solid fa-circle-exclamation me-1"></i> ${escapeHtml(res ? res.message : 'รหัสผ่านไม่ถูกต้อง')}
+            </div>
+          `;
+          if (input) {
+            input.value = '';
+            input.focus();
+          }
+        }
+      })
+      .withFailureHandler(function(err) {
+        btnSubmit.disabled = false;
+        btnSubmit.innerHTML = '<i class="fa-solid fa-arrow-right-to-bracket me-1"></i> เข้าสู่ระบบ';
+        alertBox.innerHTML = `
+          <div class="alert alert-danger py-2 small mb-3">
+            <i class="fa-solid fa-circle-exclamation me-1"></i> เชื่อมต่อล้มเหลว: ${escapeHtml(err ? err.message || err.toString() : '')}
+          </div>
+        `;
+      })
+      .verifyAdminPassword(pwd);
+  }
+
+  /**
+   * อัปเดตการแสดงผลปุ่มบน Navbar
+   */
+  function updateAdminNavState(isLoggedIn) {
+    const btnLogin = document.getElementById('btnAdminLogin');
+    const navGroup = document.getElementById('adminNavGroup');
+
+    if (isLoggedIn) {
+      if (btnLogin) btnLogin.classList.add('d-none');
+      if (navGroup) {
+        navGroup.classList.remove('d-none');
+        navGroup.classList.add('d-flex');
+      }
+    } else {
+      if (btnLogin) btnLogin.classList.remove('d-none');
+      if (navGroup) {
+        navGroup.classList.add('d-none');
+        navGroup.classList.remove('d-flex');
+      }
+    }
+  }
+
+  /**
+   * สลับมุมมองระหว่าง Dashboard และ Admin Excel Sheet
+   */
+  function toggleAdminDashboardView() {
+    const adminSection = document.getElementById('adminSection');
+    const isCurrentlyAdmin = !adminSection.classList.contains('d-none');
+    switchAdminView(!isCurrentlyAdmin);
+  }
+
+  function switchAdminView(showAdmin) {
+    const dashboardSection = document.getElementById('dashboardSection');
+    const adminSection = document.getElementById('adminSection');
+    const toggleText = document.getElementById('toggleViewText');
+
+    if (showAdmin) {
+      if (dashboardSection) dashboardSection.classList.add('d-none');
+      if (adminSection) adminSection.classList.remove('d-none');
+      if (toggleText) toggleText.textContent = 'ดูหน้า Dashboard';
+      // ถ้าตารางยังไม่มีข้อมูล ให้โหลดอัตโนมัติ
+      const tbody = document.getElementById('excelSheetTbody');
+      if (tbody && tbody.children.length === 0) {
+        loadAdminSheetData();
+      }
+    } else {
+      if (adminSection) adminSection.classList.add('d-none');
+      if (dashboardSection) dashboardSection.classList.remove('d-none');
+      if (toggleText) toggleText.textContent = 'แก้ไขข้อมูลชีต';
+    }
+  }
+
+  /**
+   * ออกจากระบบเจ้าหน้าที่
+   */
+  function logoutAdmin() {
+    if (hasUnsavedChanges) {
+      const confirmLeave = confirm('คุณมีการแก้ไขข้อมูลที่ยังไม่ได้บันทึก ต้องการออกจากระบบและละทิ้งการแก้ไขหรือไม่?');
+      if (!confirmLeave) return;
+    }
+
+    currentAdminPassword = '';
+    hasUnsavedChanges = false;
+    sessionStorage.removeItem('bcnnv_admin_auth');
+    updateAdminNavState(false);
+    switchAdminView(false);
+    // รีเฟรชแดชบอร์ด
+    loadDashboardData();
+  }
+
+  /**
+   * ดึงข้อมูลดิบจากแท็บ webapp เพื่อเรนเดอร์ตาราง Excel
+   */
+  function loadAdminSheetData(force) {
+    if (!currentAdminPassword) return;
+
+    if (hasUnsavedChanges && force) {
+      const confirmDiscard = confirm('คุณมีการแก้ไขที่ยังไม่ได้บันทึก ต้องการดึงข้อมูลใหม่และยกเลิกการแก้ไขหรือไม่?');
+      if (!confirmDiscard) return;
+    }
+
+    const btnReload = document.getElementById('btnReloadSheetData');
+    const saveStatusText = document.getElementById('adminSaveStatusText');
+    const alertBox = document.getElementById('adminAlertContainer');
+
+    if (btnReload) {
+      btnReload.disabled = true;
+      btnReload.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i> กำลังโหลด...';
+    }
+    if (saveStatusText) {
+      saveStatusText.innerHTML = '<span class="text-secondary"><i class="fa-solid fa-spinner fa-spin me-1"></i> กำลังดึงข้อมูลจากชีต...</span>';
+    }
+    if (alertBox) alertBox.innerHTML = '';
+
+    google.script.run
+      .withSuccessHandler(function(res) {
+        if (btnReload) {
+          btnReload.disabled = false;
+          btnReload.innerHTML = '<i class="fa-solid fa-rotate me-1"></i> ดึงข้อมูลใหม่';
+        }
+
+        if (!res || !res.success) {
+          if (alertBox) {
+            alertBox.innerHTML = `
+              <div class="alert alert-danger alert-dismissible fade show border-0 shadow-sm" role="alert">
+                <i class="fa-solid fa-triangle-exclamation me-1"></i> ${escapeHtml(res ? res.message : 'ไม่สามารถดึงข้อมูลได้')}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+              </div>
+            `;
+          }
+          if (saveStatusText) saveStatusText.innerHTML = '<span class="text-danger"><i class="fa-solid fa-circle-xmark"></i> ดึงข้อมูลไม่สำเร็จ</span>';
+          return;
+        }
+
+        hasUnsavedChanges = false;
+        renderAdminExcelTable(res.rows || []);
+        if (saveStatusText) {
+          saveStatusText.innerHTML = '<span class="text-success"><i class="fa-regular fa-circle-check"></i> พร้อมใช้งาน (คลิกที่เซลล์เพื่อพิมพ์แก้ไขได้ทันที)</span>';
+        }
+      })
+      .withFailureHandler(function(err) {
+        if (btnReload) {
+          btnReload.disabled = false;
+          btnReload.innerHTML = '<i class="fa-solid fa-rotate me-1"></i> ดึงข้อมูลใหม่';
+        }
+        if (alertBox) {
+          alertBox.innerHTML = `
+            <div class="alert alert-danger alert-dismissible fade show border-0 shadow-sm" role="alert">
+              <i class="fa-solid fa-circle-exclamation me-1"></i> เกิดข้อผิดพลาด: ${escapeHtml(err ? err.message || err.toString() : '')}
+              <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+          `;
+        }
+      })
+      .getWebappRawSheetData(currentAdminPassword);
+  }
+
+  /**
+   * เรนเดอร์ตาราง Excel ในหน้า Admin
+   */
+  function renderAdminExcelTable(rows) {
+    const tbody = document.getElementById('excelSheetTbody');
+    const badge = document.getElementById('adminRowsCountBadge');
+    if (!tbody) return;
+
+    tbody.innerHTML = '';
+
+    if (!rows || rows.length === 0) {
+      // เพิ่มแถวว่างเริ่มต้น 1 แถว
+      rows = [['', 'Ubuntu 22.04', '', '', '', '1', '', '', '', 'ใช้งาน']];
+    }
+
+    if (badge) badge.textContent = rows.length + ' แถว';
+
+    rows.forEach((row, rowIndex) => {
+      const tr = createExcelRowElement(row, rowIndex + 1);
+      tbody.appendChild(tr);
+    });
+  }
+
+  /**
+   * สร้างองค์ประกอบ <tr> สำหรับ 1 แถวในตาราง Excel
+   */
+  function createExcelRowElement(rowData, rowNum) {
+    const tr = document.createElement('tr');
+    tr.className = 'excel-table-row';
+
+    // คอลัมน์ลำดับแถว
+    const tdNum = document.createElement('td');
+    tdNum.className = 'row-num';
+    tdNum.textContent = rowNum;
+    tr.appendChild(tdNum);
+
+    // 10 คอลัมน์ข้อมูล
+    for (let c = 0; c < 10; c++) {
+      const td = document.createElement('td');
+      const val = rowData[c] !== undefined && rowData[c] !== null ? String(rowData[c]) : '';
+
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'excel-cell-input';
+      input.dataset.col = c;
+      input.value = val;
+
+      // จัดสไตล์ตามชนิดข้อมูล
+      if (c === 5) { // ลำดับ
+        input.classList.add('text-center');
+        input.style.width = '70px';
+      } else if (c === 6) { // ระบบภายใน
+        input.classList.add('fw-bold');
+      } else if (c === 9) { // สถานะ
+        input.setAttribute('list', 'excelStatusDatalist');
+      }
+
+      // Event ดักจับการแก้ไข
+      input.addEventListener('input', function() {
+        this.classList.add('cell-edited');
+        markUnsavedChanges();
+      });
+
+      // รองรับปุ่มลูกศรขึ้น-ลง หรือ Enter เพื่อเลื่อนไปยังเซลล์แถวถัดไปเหมือน Excel
+      input.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          const nextTr = tr.nextElementSibling;
+          if (nextTr) {
+            const nextInput = nextTr.querySelector(`input[data-col="${c}"]`);
+            if (nextInput) nextInput.focus();
+          } else if (c === 0 || c === 6) {
+            addNewAdminRow();
+          }
+        }
+      });
+
+      td.appendChild(input);
+      tr.appendChild(td);
+    }
+
+    // คอลัมน์ปุ่มจัดการ (ลบแถว)
+    const tdAction = document.createElement('td');
+    tdAction.className = 'text-center';
+    tdAction.innerHTML = `
+      <button class="btn-row-action" onclick="deleteAdminRow(this)" title="ลบแถวนี้">
+        <i class="fa-solid fa-trash-can"></i>
+      </button>
+    `;
+    tr.appendChild(tdAction);
+
+    return tr;
+  }
+
+  /**
+   * แจ้งเตือนสถานะเมื่อมีข้อมูลถูกแก้ไข
+   */
+  function markUnsavedChanges() {
+    hasUnsavedChanges = true;
+    const saveStatusText = document.getElementById('adminSaveStatusText');
+    if (saveStatusText) {
+      saveStatusText.innerHTML = '<span class="text-warning fw-bold"><i class="fa-solid fa-pen me-1"></i> มีการแก้ไขที่ยังไม่ได้บันทึก (กดปุ่ม "บันทึกข้อมูลลงชีต")</span>';
+    }
+  }
+
+  /**
+   * เพิ่มแถวใหม่ต่อท้ายตาราง
+   */
+  function addNewAdminRow() {
+    const tbody = document.getElementById('excelSheetTbody');
+    const badge = document.getElementById('adminRowsCountBadge');
+    if (!tbody) return;
+
+    const rowNum = tbody.children.length + 1;
+    let lastServerName = '';
+    let lastOs = 'Ubuntu 22.04';
+    let lastCpu = '';
+    let lastRam = '';
+    let lastHdd = '';
+    let nextOrder = '1';
+
+    if (tbody.lastElementChild) {
+      const inputs = tbody.lastElementChild.querySelectorAll('.excel-cell-input');
+      if (inputs.length >= 10) {
+        lastServerName = inputs[0].value.trim();
+        lastOs = inputs[1].value.trim() || 'Ubuntu 22.04';
+        lastCpu = inputs[2].value.trim();
+        lastRam = inputs[3].value.trim();
+        lastHdd = inputs[4].value.trim();
+        const prevOrder = parseInt(inputs[5].value.trim(), 10);
+        if (!isNaN(prevOrder)) nextOrder = String(prevOrder + 1);
+      }
+    }
+
+    const newRowData = [lastServerName, lastOs, lastCpu, lastRam, lastHdd, nextOrder, '', '', '', 'ใช้งาน'];
+    const tr = createExcelRowElement(newRowData, rowNum);
+    tbody.appendChild(tr);
+
+    if (badge) badge.textContent = tbody.children.length + ' แถว';
+    markUnsavedChanges();
+
+    const targetInput = lastServerName ? tr.querySelector('input[data-col="6"]') : tr.querySelector('input[data-col="0"]');
+    if (targetInput) {
+      targetInput.focus();
+      targetInput.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }
+
+  /**
+   * ลบแถว
+   */
+  function deleteAdminRow(btn) {
+    const tr = btn.closest('tr');
+    if (!tr) return;
+
+    const tbody = tr.parentElement;
+    const serverNameInput = tr.querySelector('input[data-col="0"]');
+    const serviceNameInput = tr.querySelector('input[data-col="6"]');
+    const label = (serverNameInput ? serverNameInput.value : '') + (serviceNameInput && serviceNameInput.value ? ' - ' + serviceNameInput.value : '');
+
+    const confirmDelete = confirm(`คุณต้องการลบแถว ${label ? '"' + label + '"' : 'นี้'} ใช่หรือไม่?`);
+    if (!confirmDelete) return;
+
+    tr.remove();
+
+    if (tbody) {
+      const rows = tbody.querySelectorAll('tr');
+      rows.forEach((row, idx) => {
+        const numTd = row.querySelector('.row-num');
+        if (numTd) numTd.textContent = idx + 1;
+      });
+
+      const badge = document.getElementById('adminRowsCountBadge');
+      if (badge) badge.textContent = rows.length + ' แถว';
+    }
+
+    markUnsavedChanges();
+  }
+
+  /**
+   * รวบรวมข้อมูลจากตารางและส่งไปบันทึกลงชีต webapp
+   */
+  function saveAdminSheetData() {
+    if (!currentAdminPassword) {
+      alert('เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่');
+      openAdminLoginModal();
+      return;
+    }
+
+    const tbody = document.getElementById('excelSheetTbody');
+    const btnSave = document.getElementById('btnSaveSheetData');
+    const saveStatusText = document.getElementById('adminSaveStatusText');
+    const alertBox = document.getElementById('adminAlertContainer');
+
+    if (!tbody) return;
+
+    const rows = tbody.querySelectorAll('tr');
+    const rowsData = [];
+
+    rows.forEach(tr => {
+      const inputs = tr.querySelectorAll('.excel-cell-input');
+      if (inputs.length >= 10) {
+        const rowVals = [];
+        for (let i = 0; i < 10; i++) {
+          rowVals.push(inputs[i].value.trim());
+        }
+        const hasContent = rowVals.some(v => v !== '');
+        if (hasContent) {
+          rowsData.push(rowVals);
+        }
+      }
+    });
+
+    if (btnSave) {
+      btnSave.disabled = true;
+      btnSave.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i> กำลังบันทึก...';
+    }
+    if (saveStatusText) {
+      saveStatusText.innerHTML = '<span class="text-primary"><i class="fa-solid fa-spinner fa-spin me-1"></i> กำลังบันทึกข้อมูลลงชีต...</span>';
+    }
+    if (alertBox) alertBox.innerHTML = '';
+
+    google.script.run
+      .withSuccessHandler(function(res) {
+        if (btnSave) {
+          btnSave.disabled = false;
+          btnSave.innerHTML = '<i class="fa-solid fa-floppy-disk me-1"></i> บันทึกข้อมูลลงชีต';
+        }
+
+        if (res && res.success) {
+          hasUnsavedChanges = false;
+          const editedCells = tbody.querySelectorAll('.cell-edited');
+          editedCells.forEach(c => c.classList.remove('cell-edited'));
+
+          if (saveStatusText) {
+            saveStatusText.innerHTML = '<span class="text-success fw-bold"><i class="fa-solid fa-circle-check me-1"></i> บันทึกสำเร็จล่าสุดเมื่อ ' + new Date().toLocaleTimeString('th-TH') + '</span>';
+          }
+
+          if (alertBox) {
+            alertBox.innerHTML = `
+              <div class="alert alert-success alert-dismissible fade show border-0 shadow-sm" role="alert">
+                <i class="fa-solid fa-circle-check fa-lg text-success me-2"></i>
+                <strong>บันทึกข้อมูลสำเร็จ!</strong> ${escapeHtml(res.message || 'ข้อมูลในชีต webapp ได้รับการอัปเดตเรียบร้อยแล้ว')}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+              </div>
+            `;
+          }
+
+          // ซิงค์ข้อมูลกลับไปอัปเดตหน้า Dashboard ทันที
+          loadDashboardData();
+        } else {
+          if (saveStatusText) {
+            saveStatusText.innerHTML = '<span class="text-danger fw-bold"><i class="fa-solid fa-circle-xmark me-1"></i> บันทึกล้มเหลว</span>';
+          }
+          if (alertBox) {
+            alertBox.innerHTML = `
+              <div class="alert alert-danger alert-dismissible fade show border-0 shadow-sm" role="alert">
+                <i class="fa-solid fa-triangle-exclamation fa-lg text-danger me-2"></i>
+                <strong>บันทึกไม่สำเร็จ:</strong> ${escapeHtml(res ? res.message : 'ไม่ทราบสาเหตุ')}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+              </div>
+            `;
+          }
+        }
+      })
+      .withFailureHandler(function(err) {
+        if (btnSave) {
+          btnSave.disabled = false;
+          btnSave.innerHTML = '<i class="fa-solid fa-floppy-disk me-1"></i> บันทึกข้อมูลลงชีต';
+        }
+        if (saveStatusText) {
+          saveStatusText.innerHTML = '<span class="text-danger fw-bold"><i class="fa-solid fa-circle-xmark me-1"></i> เกิดข้อผิดพลาด</span>';
+        }
+        if (alertBox) {
+          alertBox.innerHTML = `
+            <div class="alert alert-danger alert-dismissible fade show border-0 shadow-sm" role="alert">
+              <i class="fa-solid fa-circle-exclamation fa-lg text-danger me-2"></i>
+              <strong>เกิดข้อผิดพลาดในการบันทึก:</strong> ${escapeHtml(err ? err.message || err.toString() : '')}
+              <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+          `;
+        }
+      })
+      .saveWebappSheetData(currentAdminPassword, rowsData);
+  }
+</script>
